@@ -1073,6 +1073,10 @@ int uv_spawn(uv_loop_t* loop,
     process_flags |= CREATE_SUSPENDED;
   }
 
+  /* Don't create console window. */
+  process_flags |= CREATE_NO_WINDOW;
+
+
   if (!CreateProcessW(application_path,
                      arguments,
                      NULL,

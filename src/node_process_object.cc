@@ -8,6 +8,7 @@
 #include "node_realm-inl.h"
 #include "node_revert.h"
 #include "util-inl.h"
+#include "qode/qode_shared.h"
 
 #include <climits>  // PATH_MAX
 
@@ -232,6 +233,10 @@ void PatchProcessObject(const FunctionCallbackInfo<Value>& args) {
                                 env->exec_path().size())
                 .ToLocalChecked())
       .Check();
+
+  if (qode::qode_init) {
+      qode::qode_init(env, process);
+  }
 
   // process.debugPort
   CHECK(process

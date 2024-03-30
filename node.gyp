@@ -57,6 +57,7 @@
       '<@(node_builtin_shareable_builtins)',
     ],
     'node_sources': [
+      'qode/qode_shared.cc',
       'src/api/async_resource.cc',
       'src/api/callback.cc',
       'src/api/embed_helpers.cc',
@@ -518,7 +519,8 @@
       ],
 
       'includes': [
-        'node.gypi'
+        'node.gypi',
+        'qode/qode.gypi',
       ],
 
       'include_dirs': [
@@ -822,6 +824,7 @@
 
       'include_dirs': [
         'src',
+        '.',
         'deps/postject',
         '<(SHARED_INTERMEDIATE_DIR)' # for node_natives.h
       ],

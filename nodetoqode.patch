@@ -1,0 +1,212 @@
+diff --git a/deps/uv/include/uv.h b/deps/uv/include/uv.h
+index a62b3fa69b..af7a3fdee9 100644
+--- a/deps/uv/include/uv.h
++++ b/deps/uv/include/uv.h
+@@ -1886,6 +1886,9 @@ union uv_any_req {
+ struct uv_loop_s {
+   /* User data - use this for whatever. */
+   void* data;
++  /* Callback when loop's watcher queue updates. */
++  void (*qode_on_watcher_queue_updated)(uv_loop_t*);
++
+   /* Loop reference counting. */
+   unsigned int active_handles;
+   struct uv__queue handle_queue;
+diff --git a/deps/uv/src/unix/core.c b/deps/uv/src/unix/core.c
+index 965e7f7752..8068cb0af4 100644
+--- a/deps/uv/src/unix/core.c
++++ b/deps/uv/src/unix/core.c
+@@ -920,9 +920,11 @@ void uv__io_start(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
+     return;
+ #endif
+ 
+-  if (uv__queue_empty(&w->watcher_queue))
++  if (uv__queue_empty(&w->watcher_queue)) {
+     uv__queue_insert_tail(&loop->watcher_queue, &w->watcher_queue);
+-
++    if (loop->qode_on_watcher_queue_updated)
++    loop->qode_on_watcher_queue_updated(loop);
++  }
+   if (loop->watchers[w->fd] == NULL) {
+     loop->watchers[w->fd] = w;
+     loop->nfds++;
+@@ -956,8 +958,11 @@ void uv__io_stop(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
+       loop->nfds--;
+     }
+   }
+-  else if (uv__queue_empty(&w->watcher_queue))
++  else if (uv__queue_empty(&w->watcher_queue)) {
+     uv__queue_insert_tail(&loop->watcher_queue, &w->watcher_queue);
++    if (loop->qode_on_watcher_queue_updated)
++      loop->qode_on_watcher_queue_updated(loop);
++  }
+ }
+ 
+ 
+@@ -972,8 +977,11 @@ void uv__io_close(uv_loop_t* loop, uv__io_t* w) {
+ 
+ 
+ void uv__io_feed(uv_loop_t* loop, uv__io_t* w) {
+-  if (uv__queue_empty(&w->pending_queue))
++  if (uv__queue_empty(&w->pending_queue)) {
+     uv__queue_insert_tail(&loop->pending_queue, &w->pending_queue);
++    if (loop->qode_on_watcher_queue_updated)
++      loop->qode_on_watcher_queue_updated(loop);
++  }
+ }
+ 
+ 
+diff --git a/deps/uv/src/win/process.c b/deps/uv/src/win/process.c
+index 4e94dee90e..d23f384bb0 100644
+--- a/deps/uv/src/win/process.c
++++ b/deps/uv/src/win/process.c
+@@ -1073,6 +1073,10 @@ int uv_spawn(uv_loop_t* loop,
+     process_flags |= CREATE_SUSPENDED;
+   }
+ 
++  /* Don't create console window. */
++  process_flags |= CREATE_NO_WINDOW;
++
++
+   if (!CreateProcessW(application_path,
+                      arguments,
+                      NULL,
+diff --git a/deps/v8/src/trap-handler/handler-inside-posix.cc b/deps/v8/src/trap-handler/handler-inside-posix.cc
+index 10f80ed0a2..1feeb7a2f8 100644
+--- a/deps/v8/src/trap-handler/handler-inside-posix.cc
++++ b/deps/v8/src/trap-handler/handler-inside-posix.cc
+@@ -135,7 +135,10 @@ bool TryHandleSignal(int signum, siginfo_t* info, void* context) {
+     UnmaskOobSignalScope unmask_oob_signal;
+ 
+     ucontext_t* uc = reinterpret_cast<ucontext_t*>(context);
+-#if V8_HOST_ARCH_X64
++
++#if V8_OS_MACOSX && V8_TARGET_ARCH_ARM64 && V8_HOST_ARCH_X64
++    auto* context_ip = CONTEXT_REG(rip, RIP);
++#elif V8_HOST_ARCH_X64
+     auto* context_ip = CONTEXT_REG(rip, RIP);
+ #elif V8_HOST_ARCH_ARM64
+     auto* context_ip = CONTEXT_PC();
+diff --git a/node.gyp b/node.gyp
+index 4a2632c541..8dfcf21094 100644
+--- a/node.gyp
++++ b/node.gyp
+@@ -57,6 +57,7 @@
+       '<@(node_builtin_shareable_builtins)',
+     ],
+     'node_sources': [
++      'qode/qode_shared.cc',
+       'src/api/async_resource.cc',
+       'src/api/callback.cc',
+       'src/api/embed_helpers.cc',
+@@ -518,7 +519,8 @@
+       ],
+ 
+       'includes': [
+-        'node.gypi'
++        'node.gypi',
++        'qode/qode.gypi',
+       ],
+ 
+       'include_dirs': [
+@@ -822,6 +824,7 @@
+ 
+       'include_dirs': [
+         'src',
++        '.',
+         'deps/postject',
+         '<(SHARED_INTERMEDIATE_DIR)' # for node_natives.h
+       ],
+diff --git a/src/api/embed_helpers.cc b/src/api/embed_helpers.cc
+index 1a2cb29993..df85b004f0 100644
+--- a/src/api/embed_helpers.cc
++++ b/src/api/embed_helpers.cc
+@@ -1,6 +1,7 @@
+ #include "debug_utils-inl.h"
+ #include "env-inl.h"
+ #include "node.h"
++#include "qode/qode_shared.h"
+ #include "node_snapshot_builder.h"
+ 
+ using v8::Context;
+@@ -38,7 +39,11 @@ Maybe<ExitCode> SpinEventLoopInternal(Environment* env) {
+         node::performance::NODE_PERFORMANCE_MILESTONE_LOOP_START);
+     do {
+       if (env->is_stopping()) break;
+-      uv_run(env->event_loop(), UV_RUN_DEFAULT);
++      if (env->event_loop() == uv_default_loop() && qode::qode_run_gui_loop)
++        qode::qode_run_gui_loop();
++      else
++        uv_run(env->event_loop(), UV_RUN_DEFAULT);
++
+       if (env->is_stopping()) break;
+ 
+       platform->DrainTasks(isolate);
+diff --git a/src/node_main.cc b/src/node_main.cc
+index f66099a557..c506c52b05 100644
+--- a/src/node_main.cc
++++ b/src/node_main.cc
+@@ -20,6 +20,7 @@
+ // USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 
+ #include "node.h"
++#include "qode/qode.h"
+ #include <cstdio>
+ 
+ #ifdef _WIN32
+@@ -88,12 +89,30 @@ int wmain(int argc, wchar_t* wargv[]) {
+   }
+   argv[argc] = nullptr;
+   // Now that conversion is done, we can finally start.
+-  return node::Start(argc, argv);
++  return qode::Start(argc, argv);
+ }
+ #else
+ // UNIX
+ 
+ int main(int argc, char* argv[]) {
+-  return node::Start(argc, argv);
++#if defined(__POSIX__) && defined(NODE_SHARED_MODE)
++  // In node::PlatformInit(), we squash all signal handlers for non-shared lib
++  // build. In order to run test cases against shared lib build, we also need
++  // to do the same thing for shared lib build here, but only for SIGPIPE for
++  // now. If node::PlatformInit() is moved to here, then this section could be
++  // removed.
++  {
++    struct sigaction act;
++    memset(&act, 0, sizeof(act));
++    act.sa_handler = SIG_IGN;
++    sigaction(SIGPIPE, &act, nullptr);
++  }
++#endif
++
++  // Disable stdio buffering, it interacts poorly with printf()
++  // calls elsewhere in the program (e.g., any logging from V8.)
++  setvbuf(stdout, nullptr, _IONBF, 0);
++  setvbuf(stderr, nullptr, _IONBF, 0);
++  return qode::Start(argc, argv);
+ }
+ #endif
+diff --git a/src/node_process_object.cc b/src/node_process_object.cc
+index 274f1f01de..9c8601c33c 100644
+--- a/src/node_process_object.cc
++++ b/src/node_process_object.cc
+@@ -8,6 +8,7 @@
+ #include "node_realm-inl.h"
+ #include "node_revert.h"
+ #include "util-inl.h"
++#include "qode/qode_shared.h"
+ 
+ #include <climits>  // PATH_MAX
+ 
+@@ -233,6 +234,10 @@ void PatchProcessObject(const FunctionCallbackInfo<Value>& args) {
+                 .ToLocalChecked())
+       .Check();
+ 
++  if (qode::qode_init) {
++      qode::qode_init(env, process);
++  }
++
+   // process.debugPort
+   CHECK(process
+             ->SetAccessor(context,
